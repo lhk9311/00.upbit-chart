@@ -5,6 +5,11 @@
       실시간 리스트
     </h1>
 
+    <!-- 현재 날짜·시간 -->
+    <p class="now-clock">
+      {{ nowText }}
+    </p>
+
     <div class="row g-3">
 
       <!-- 코인 목록 -->
@@ -19,8 +24,8 @@
           <h3>
             {{
               selectedCoin
-                ? `${selectedCoin.korean_name} (${selectedCoin.market})`
-                : '차트 영역'
+                  ? `${selectedCoin.korean_name} (${selectedCoin.market})`
+                  : '차트 영역'
             }}
           </h3>
 
@@ -62,7 +67,7 @@
           <div class="chart-body">
 
             <CoinChart
-              :chartData="chartData"
+                :chartData="chartData"
             />
 
           </div>
@@ -76,374 +81,189 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { ref, onMounted, onBeforeUnmount } from 'vue';
 import axios from 'axios';
-
-// 웹소켓
-let socket = null;
-
-// 현재 캔들
-let currentCandle = null;
-
-// 현재 분
-let currentMinute = null;
 
 import CoinList from './components/CoinList.vue';
 import CoinChart from './components/CoinChart.vue';
 
+const MAX_CANDLES = 50;
+const MINUTE = 60 * 1000;
+
 // 선택된 코인
 const selectedCoin = ref(null);
 
-// 차트 종류
+// 조회 기간 (숫자 = 분봉, 'day' | 'week' | 'month')
 const currentPeriod = ref('day');
+
+// 실시간 모드 여부 (기간 값과 분리해서 관리)
+const isRealtime = ref(false);
 
 // 차트 데이터
 const chartData = ref([]);
 
 // 웹소켓
-const websocket = ref(null);
+let socket = null;
 
-// 코인 클릭
+// ---------- 현재 날짜·시간 ----------
+const nowText = ref('');
+let clockTimer = null;
+
+const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토'];
+const pad = (n) => String(n).padStart(2, '0');
+
+const updateClock = () => {
+  const d = new Date();
+  nowText.value =
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+      `(${WEEKDAYS[d.getDay()]}) ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+
+onMounted(() => {
+  updateClock();
+  clockTimer = setInterval(updateClock, 1000);
+});
+
+onBeforeUnmount(() => {
+  clearInterval(clockTimer);
+  closeSocket();
+});
+
+// ---------- 코인 선택 ----------
 const selectCoin = async (coin) => {
-
   selectedCoin.value = coin;
 
-  console.log('선택된 코인', coin);
-
-  if (
-    currentPeriod.value === 'realtime'
-  ) {
-
-    chartData.value = [];
-
-    currentCandle = null;
-    currentMinute = null;
-
-    startRealtime(
-      coin.market
-    );
-
+  if (isRealtime.value) {
+    await startRealtime(coin.market);
     return;
   }
 
-  await loadChart(
-    coin.market
-  );
+  await loadChart(coin.market);
 };
 
-// 기간 변경
+// ---------- 기간 변경 ----------
 const changePeriod = async (period) => {
-
-  currentPeriod.value = period;
+  if (period === 'realtime') {
+    isRealtime.value = true;
+    currentPeriod.value = 1;
+  } else {
+    isRealtime.value = false;
+    currentPeriod.value = period;
+    closeSocket();
+  }
 
   if (!selectedCoin.value) {
     return;
   }
 
-  // 실시간
-  if (period === 'realtime') {
-
-    currentPeriod.value = 1;
-
-    await loadChart(
-      selectedCoin.value.market
-    );
-
-    currentCandle = null;
-    currentMinute = null;
-
-    startRealtime(
-      selectedCoin.value.market
-    );
-
-    return;
+  if (isRealtime.value) {
+    await startRealtime(selectedCoin.value.market);
+  } else {
+    await loadChart(selectedCoin.value.market);
   }
-  
-  // 일반 차트 선택 시 웹소켓 종료
-  if (socket) {
-    socket.close();
-  }
-
-  await loadChart(
-    selectedCoin.value.market
-  );
 };
 
-// 차트 조회
+// ---------- 캔들 조회 (REST) ----------
+const candleUrl = (period) => {
+  if (typeof period === 'number') {
+    return `https://api.upbit.com/v1/candles/minutes/${period}`;
+  }
+  return `https://api.upbit.com/v1/candles/${period}s`; // days, weeks, months
+};
+
+// 업비트 캔들 → 차트 데이터 { x: UTC 밀리초, y: [시가, 고가, 저가, 종가] }
+// candle_date_time_utc 기준으로 변환해야 브라우저 시간대와 상관없이 정확함
+const toChartCandle = (candle) => ({
+  x: new Date(candle.candle_date_time_utc + 'Z').getTime(),
+  y: [
+    candle.opening_price,
+    candle.high_price,
+    candle.low_price,
+    candle.trade_price
+  ]
+});
+
 const loadChart = async (market) => {
-
   try {
+    const res = await axios.get(candleUrl(currentPeriod.value), {
+      params: { market, count: MAX_CANDLES }
+    });
 
-    let url = '';
-
-    // 분봉
-    if (typeof currentPeriod.value === 'number') {
-
-      url =
-        `https://api.upbit.com/v1/candles/minutes/${currentPeriod.value}`;
-
-    }
-
-    // 일봉
-    else if (currentPeriod.value === 'day') {
-
-      url =
-        'https://api.upbit.com/v1/candles/days';
-
-    }
-
-    // 주봉
-    else if (currentPeriod.value === 'week') {
-
-      url =
-        'https://api.upbit.com/v1/candles/weeks';
-
-    }
-
-    // 월봉
-    else if (currentPeriod.value === 'month') {
-
-      url =
-        'https://api.upbit.com/v1/candles/months';
-
-    }
-
-    const res = await axios.get(
-      url,
-      {
-        params: {
-          market,
-          count: 50
-        }
-      }
-    );
-
-  console.log('URL');
-  console.log(url);
-
-  console.log('응답');
-  console.log(res.data);
-
-  console.log(Array.isArray(res.data));
-
-    const candles = res.data.reverse();
-
-    console.log('캔들 원본');
-    console.log(candles);
-
-    console.log('캔들 변환');
-
-    const convertedData = candles.map(candle => ({
-      x: new Date(
-        candle.candle_date_time_kst
-      ).getTime(),
-      y: [
-        candle.opening_price,
-        candle.high_price,
-        candle.low_price,
-        candle.trade_price
-      ]
-    }));
-
-    console.log('차트데이터 전체');
-    console.log(chartData.value);
-
-    console.log('첫번째');
-    console.log(chartData.value[0]);
-
-    console.log(convertedData);
-
-    chartData.value = convertedData;
-
-    // 차트 데이터 구성
-    chartData.value = candles.map(candle => ({
-
-      x: new Date(
-        candle.candle_date_time_kst
-      ),
-
-      y: [
-
-        candle.opening_price, // 시가
-
-        candle.high_price, // 고가
-
-        candle.low_price, // 저가
-
-        candle.trade_price // 종가
-
-      ]
-
-    }));
-
-    
-  }
-  catch (err) {
-
-    console.error(err);
-
+    // 응답은 최신순 → 오래된 순으로 뒤집기
+    chartData.value = res.data.reverse().map(toChartCandle);
+  } catch (err) {
+    console.error('캔들 조회 실패', err);
   }
 };
 
-
-
-// 실시간 차트(웹소켓)
-const startRealtime = (market) => {
-
-console.log('웹소켓 시작', market);
-
-if (socket) {
-socket.close();
-}
-
-socket = new WebSocket(
-'wss://api.upbit.com/websocket/v1'
-);
-
-socket.onopen = () => {
-
-console.log('웹소켓 연결 성공');
-
-socket.send(
-  JSON.stringify([
-    {
-      ticket: 'test'
-    },
-    {
-      type: 'ticker',
-      codes: [market]
-    }
-  ])
-);
-
+// ---------- 실시간 (웹소켓) ----------
+const closeSocket = () => {
+  if (socket) {
+    socket.onmessage = null;
+    socket.close();
+    socket = null;
+  }
 };
 
-// 웹소켓
-socket.onmessage = async (event) => {
+const startRealtime = async (market) => {
+  closeSocket();
 
-  console.log('실시간 데이터 수신');
+  // 직전 1분봉 50개를 먼저 깔고, 그 위에 실시간 체결을 이어 붙인다
+  await loadChart(market);
 
-    const buffer =
-      await event.data.arrayBuffer();
+  const ws = new WebSocket('wss://api.upbit.com/websocket/v1');
+  socket = ws;
 
-    const text =
-      new TextDecoder('utf-8')
-        .decode(buffer);
+  ws.onopen = () => {
+    ws.send(JSON.stringify([
+      { ticket: `upbit-chart-${Date.now()}` },
+      { type: 'ticker', codes: [market] }
+    ]));
+  };
 
-    const data =
-      JSON.parse(text);
+  ws.onmessage = async (event) => {
+    const data = JSON.parse(await event.data.text());
 
-    const price =
-      data.trade_price;
-
-    const now =
-      new Date();
-
-    const minuteKey =
-      `${now.getHours()}:${now.getMinutes()}`;
-
-    console.log('minuteKey', minuteKey);
-
-    // 최초 캔들 생성
-    if (!currentCandle) {
-
-      console.log('최초 캔들 생성');
-
-      currentMinute = minuteKey;
-
-      currentCandle = {
-
-        x: now,
-
-        y: [
-          price, // 시가
-          price, // 고가
-          price, // 저가
-          price  // 종가
-        ]
-
-      };
-
-      chartData.value.push(
-        currentCandle
-      );
-
-      chartData.value = [
-        ...chartData.value
-      ];
-
+    // 다른 코인 데이터나 이미 닫힌 소켓의 메시지는 무시
+    if (ws !== socket || data.code !== market) {
       return;
     }
 
-    // 같은 분
-    if (currentMinute === minuteKey) {
-
-      currentCandle.y[1] =
-        Math.max(
-          currentCandle.y[1],
-          price
-        );
-
-      currentCandle.y[2] =
-        Math.min(
-          currentCandle.y[2],
-          price
-        );
-
-      currentCandle.y[3] =
-        price;
-
-      chartData.value = [
-        ...chartData.value
-      ];
-
-      console.log('현재캔들', currentCandle);
-      console.log('종가', currentCandle.y[3]);
-    }
-
-    // 새로운 분
-    else {
-
-      console.log('새 분 생성');
-
-      currentMinute = minuteKey;
-
-      currentCandle = {
-
-        x: now,
-
-        y: [
-          price,
-          price,
-          price,
-          price
-        ]
-
-      };
-
-      chartData.value.push(
-        currentCandle
-      );
-
-      // 최근 50개 유지
-      if (
-        chartData.value.length > 50
-      ) {
-
-        chartData.value.shift();
-
-      }
-
-      chartData.value = [
-        ...chartData.value
-      ];
-
-    }
-
+    applyTick(data.trade_price, data.trade_timestamp);
   };
 
+  ws.onerror = (err) => console.error('웹소켓 오류', err);
 };
 
+// 체결 1건을 1분봉에 반영
+const applyTick = (price, timestamp) => {
+  // 체결 시각을 분 단위로 내림 → REST 1분봉의 시각과 정확히 맞물림
+  const bucket = Math.floor(timestamp / MINUTE) * MINUTE;
+
+  const candles = chartData.value;
+  const last = candles[candles.length - 1];
+
+  if (last && last.x === bucket) {
+    // 같은 분: 고가·저가·종가만 갱신
+    const [open, high, low] = last.y;
+    candles[candles.length - 1] = {
+      x: bucket,
+      y: [open, Math.max(high, price), Math.min(low, price), price]
+    };
+  } else if (!last || bucket > last.x) {
+    // 새로운 분: 새 캔들 추가
+    candles.push({ x: bucket, y: [price, price, price, price] });
+
+    if (candles.length > MAX_CANDLES) {
+      candles.shift();
+    }
+  } else {
+    // 이미 지난 분의 늦게 도착한 체결은 무시
+    return;
+  }
+
+  chartData.value = [...candles];
+};
 </script>
 
 <style>
@@ -464,8 +284,15 @@ body {
 
 .main-title {
   text-align: center;
-  margin-bottom: 30px;
+  margin-bottom: 8px;
   color: white;
+}
+
+.now-clock {
+  text-align: center;
+  color: #8b949e;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 24px;
 }
 
 .chart-card {

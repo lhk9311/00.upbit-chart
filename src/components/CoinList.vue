@@ -13,9 +13,9 @@
       </h5>
 
       <div
-        v-for="coin in topCoins"
-        :key="coin.market"
-        class="top-coin-item"
+          v-for="coin in topCoins"
+          :key="coin.market"
+          class="top-coin-item"
       >
 
         <span>
@@ -33,9 +33,9 @@
 
     <div class="search-box">
       <input
-        type="text"
-        v-model="searchKeyword"
-        placeholder="코인 이름으로 검색"
+          type="text"
+          v-model="searchKeyword"
+          placeholder="코인 이름으로 검색"
       />
 
       <span class="search-icon">
@@ -45,55 +45,55 @@
 
     <table class="table table-dark table-hover align-middle">
       <thead>
-        <tr>
-          <th @click="sortBy('korean_name')">
-            한글명 ↕
-          </th>
+      <tr>
+        <th @click="sortBy('korean_name')">
+          한글명 ↕
+        </th>
 
-          <th @click="sortBy('trade_price')">
-            현재가 ↕
-          </th>
+        <th @click="sortBy('trade_price')">
+          현재가 ↕
+        </th>
 
-          <th @click="sortBy('change_rate')">
-            전일대비 ↕
-          </th>
+        <th @click="sortBy('change_rate')">
+          전일대비 ↕
+        </th>
 
-          <th @click="sortBy('volume')">
-            거래량 ↕
-          </th>
-        </tr>
+        <th @click="sortBy('volume')">
+          거래량 ↕
+        </th>
+      </tr>
       </thead>
 
       <tbody>
-        <tr
+      <tr
           v-for="coin in filteredCoins"
           :key="coin.market"
           @click="selectCoin(coin)"
           style="cursor:pointer"
-        >
-          <td>
-            {{ coin.korean_name }}
-          </td>
+      >
+        <td>
+          {{ coin.korean_name }}
+        </td>
 
-          <td class="text-end">
-            {{ coin.trade_price.toLocaleString() }}
-          </td>
+        <td class="text-end">
+          {{ coin.trade_price.toLocaleString() }}
+        </td>
 
-          <td
+        <td
             class="text-end"
             :class="
               coin.change_rate >= 0
                 ? 'text-danger'
                 : 'text-primary'
             "
-          >
-            {{ (coin.change_rate * 100).toFixed(2) }}%
-          </td>
+        >
+          {{ (coin.change_rate * 100).toFixed(2) }}%
+        </td>
 
-          <td class="text-end">
-            {{ formatVolume(coin.volume) }}
-          </td>
-        </tr>
+        <td class="text-end">
+          {{ formatVolume(coin.volume) }}
+        </td>
+      </tr>
       </tbody>
     </table>
 
@@ -101,7 +101,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import api from '../api/upbitApi';
 
 // 부모(App.vue)에게 이벤트 전달
@@ -120,7 +120,7 @@ const sortDirection = ref('asc');
 // 검색 결과
 const filteredCoins = computed(() => {
   return coins.value.filter((coin) =>
-    coin.korean_name.includes(searchKeyword.value)
+      coin.korean_name.includes(searchKeyword.value)
   );
 });
 
@@ -128,11 +128,11 @@ const filteredCoins = computed(() => {
 const topCoins = computed(() => {
 
   return [...coins.value]
-    .sort(
-      (a, b) =>
-        b.change_rate - a.change_rate
-    )
-    .slice(0, 5);
+      .sort(
+          (a, b) =>
+              b.change_rate - a.change_rate
+      )
+      .slice(0, 5);
 
 });
 
@@ -140,13 +140,13 @@ const topCoins = computed(() => {
 const formatVolume = (value) => {
   if (value >= 1000000000000) {
     return (
-      (value / 1000000000000).toFixed(1) + '조'
+        (value / 1000000000000).toFixed(1) + '조'
     );
   }
 
   if (value >= 100000000) {
     return (
-      (value / 100000000).toFixed(0) + '억'
+        (value / 100000000).toFixed(0) + '억'
     );
   }
 
@@ -157,12 +157,23 @@ const formatVolume = (value) => {
 const sortBy = (field) => {
   if (sortField.value === field) {
     sortDirection.value =
-      sortDirection.value === 'asc'
-        ? 'desc'
-        : 'asc';
+        sortDirection.value === 'asc'
+            ? 'desc'
+            : 'asc';
   } else {
     sortField.value = field;
     sortDirection.value = 'asc';
+  }
+
+  applySort();
+};
+
+// 현재 정렬 상태를 목록에 적용 (시세 갱신 후에도 순서 유지)
+const applySort = () => {
+  const field = sortField.value;
+
+  if (!field) {
+    return;
   }
 
   coins.value.sort((a, b) => {
@@ -171,13 +182,13 @@ const sortBy = (field) => {
 
     if (typeof valueA === 'string') {
       return sortDirection.value === 'asc'
-        ? valueA.localeCompare(valueB)
-        : valueB.localeCompare(valueA);
+          ? valueA.localeCompare(valueB)
+          : valueB.localeCompare(valueA);
     }
 
     return sortDirection.value === 'asc'
-      ? valueA - valueB
-      : valueB - valueA;
+        ? valueA - valueB
+        : valueB - valueA;
   });
 };
 
@@ -186,54 +197,75 @@ const selectCoin = (coin) => {
   emit('selectCoin', coin);
 };
 
-// 최초 조회
-onMounted(async () => {
+// 시세 자동 갱신 주기 (ms)
+const REFRESH_MS = 3000;
+
+// KRW 마켓 정보 (한글명 등) — 최초 1회 조회
+let krwMarkets = [];
+let refreshTimer = null;
+
+// 현재가 조회: 마켓 전체를 한 번의 요청으로 가져온다
+const loadTickers = async () => {
   try {
-    const marketRes = await api.get('/market/all');
-
-    const krwMarkets = marketRes.data.filter(
-      item => item.market.startsWith('KRW-')
-    );
-
-    const marketCodes = krwMarkets
-      .map(item => item.market)
-      .join(',');
-
     const tickerRes = await api.get('/ticker', {
       params: {
-        markets: marketCodes,
+        markets: krwMarkets.map(item => item.market).join(','),
       },
     });
 
     coins.value = tickerRes.data.map((ticker) => {
 
       const marketInfo = krwMarkets.find(
-        item => item.market === ticker.market
+          item => item.market === ticker.market
       );
 
       return {
         market: ticker.market,
 
         korean_name:
-          marketInfo?.korean_name ?? '',
+            marketInfo?.korean_name ?? '',
 
         trade_price:
-          ticker.trade_price,
+        ticker.trade_price,
 
         change_rate:
-          ticker.signed_change_rate,
+        ticker.signed_change_rate,
 
         change_price:
-          ticker.signed_change_price,
+        ticker.signed_change_price,
 
         volume:
-          ticker.acc_trade_price_24h,
+        ticker.acc_trade_price_24h,
       };
     });
+
+    applySort();
+
+  } catch (error) {
+    console.error('시세 조회 실패', error);
+  }
+};
+
+// 최초 조회 + 주기적 갱신
+onMounted(async () => {
+  try {
+    const marketRes = await api.get('/market/all');
+
+    krwMarkets = marketRes.data.filter(
+        item => item.market.startsWith('KRW-')
+    );
+
+    await loadTickers();
+
+    refreshTimer = setInterval(loadTickers, REFRESH_MS);
 
   } catch (error) {
     console.error(error);
   }
+});
+
+onBeforeUnmount(() => {
+  clearInterval(refreshTimer);
 });
 </script>
 
